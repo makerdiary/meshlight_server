@@ -1,0 +1,215 @@
+#!/usr/bin/env node
+
+/**
+ * Module dependencies.
+ */
+
+var app = require('../app');
+var debug = require('debug')('meshlight:server');
+var http = require('http');
+var sio = require('socket.io');
+
+//on Edison
+var mraa = require('mraa');
+console.log('MRAA Version: ' + mraa.getVersion());
+var serialport = require("serialport");
+var SerialPort = serialport.SerialPort;
+
+var isSpWriting = false;
+
+u = new mraa.Uart(0);
+var sp = new SerialPort(u.getDevicePath(), {
+    baudrate: 38400,
+    dataBits: 8,
+    stopBtis: 1,
+    parity: 'none',
+    parser: serialport.parsers.readline("\r\n")
+}, true);
+
+sp.open(function (error) {
+  if (error) {
+    console.log('Failed to open ' + u.getDevicePath() + ': ' + error);
+  } else {
+    console.log("Serialport open successfully!");
+
+    if(!isSpWriting) {
+      isSpWriting = true;
+      sp.write('stopterm\r', function(err, bytes) {
+        if(err) {
+          console.log("Serialport write error: " + err);
+        }
+        else {
+          isSpWriting = false;
+        }
+      });
+    }
+    
+  }
+});
+
+sp.on('data', function(data) {
+  var rxstr = data.toString().trim();
+    
+  if(rxstr.substring(0,1)=='{' && rxstr.substring(rxstr.length-1)=='}') {
+    var nodejson = JSON.parse(rxstr);
+    if(nodejson.type) {
+      io.emit(nodejson.type, nodejson);
+    }
+
+  }
+});
+
+//reflesh devices list every 5 seconds.
+setInterval(function() {
+  //NodeStatusList = { };
+  if(sp.isOpen()) {
+
+    if(!isSpWriting) {
+      isSpWriting = true;
+      sp.write('action 0 lighting get_status\r', function(err, bytes) {
+        if(err) {
+          console.log("Serialport write error: " + err);
+        }
+        else {
+          isSpWriting = false;
+        }
+      });
+    }
+
+  }
+}, 2000);
+
+
+//close uart when exiting.
+process.on('SIGINT', function () {
+  console.log('closing ' + u.getDevicePath());
+  sp.close(function(error) {
+    if(error) {
+      console.log('Failed to close: ' + error);
+    }
+  });
+  console.log('GoodBye');
+  process.exit(0);
+});
+
+
+/**
+ * Get port from environment and store in Express.
+ */
+
+var port = normalizePort(process.env.PORT || '3000');
+app.set('port', port);
+
+/**
+ * Create HTTP server.
+ */
+
+var server = http.createServer(app);
+
+
+/**
+* Create Socket IO
+*/
+var io = sio(server);
+
+io.on('connection', function (socket) {
+
+  //handle set_wrgb event
+  socket.on('set_wrgb', function (data) {
+    console.log(data);
+
+    var nodeId = data.nodeId;
+    var w = data.color.a*100;
+    var r = data.color.r;
+    var g = data.color.g;
+    var b = data.color.b;
+
+    if(!isSpWriting) {
+      isSpWriting = true;
+      sp.write('action ' + nodeId + ' lighting set_wrgb ' + w + ' ' + r + ' ' + g + ' ' + b + '\r', function(err, bytes) {
+        if(err) {
+          console.log("Serialport write error: " + err);
+        }
+        else {
+          isSpWriting = false;
+        }
+      });
+    }
+  });
+
+  //handle on_off switch
+  socket.on('switch_state', function (data) {
+    console.log(data);
+  });
+
+});
+
+
+/**
+ * Listen on provided port, on all network interfaces.
+ */
+
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+
+/**
+ * Normalize a port into a number, string, or false.
+ */
+
+function normalizePort(val) {
+  var port = parseInt(val, 10);
+
+  if (isNaN(port)) {
+    // named pipe
+    return val;
+  }
+
+  if (port >= 0) {
+    // port number
+    return port;
+  }
+
+  return false;
+}
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  var bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  var addr = server.address();
+  var bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
